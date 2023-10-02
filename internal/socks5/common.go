@@ -16,7 +16,6 @@ import (
 
 var (
 	errStringTooLong        = errors.New("string too long")
-	errUserAuthFailed       = errors.New("user authentication failed")
 	errNoSupportedAuth      = errors.New("no supported authentication mechanism")
 	errUnrecognizedAddrType = errors.New("unrecognized address type")
 )
@@ -143,15 +142,7 @@ type authMethod byte
 
 const (
 	noAuth       authMethod = 0x00 // no authentication required
-	gssapiAuth   authMethod = 0x01 // use GSSAPI
-	userAuth     authMethod = 0x02 // use username/password
 	noAcceptable authMethod = 0xff // no acceptable authentication methods
-)
-
-const (
-	userAuthVersion = 0x01
-	authSuccess     = 0x00
-	authFailure     = 0x01
 )
 
 func readBytes(r io.Reader) ([]byte, error) {

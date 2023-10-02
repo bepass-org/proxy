@@ -9,8 +9,6 @@ import (
 
 // Server is accepting connections and handling the details of the SOCKS4 protocol
 type Server struct {
-	// Authentication is proxy authentication
-	Authentication Authentication
 	// ProxyDial specifies the optional proxyDial function for
 	// establishing the transport connection.
 	ProxyDial func(ctx context.Context, network string, address string) (net.Conn, error)
@@ -23,45 +21,42 @@ type Server struct {
 }
 
 type Logger interface {
-	Println(v ...interface{})
+	Debug(v ...interface{})
+	Error(v ...interface{})
 }
 
-// NewServer creates a new Server
-func NewServer() *Server {
-	return &Server{}
+type DefaultLogger struct{}
+
+func (l DefaultLogger) Debug(v ...interface{}) {
+	fmt.Println(v...)
 }
 
-// ListenAndServe is used to create a listener and serve on it
-func (s *Server) ListenAndServe(network, addr string) error {
-	var lc net.ListenConfig
-	l, err := lc.Listen(s.context(), network, addr)
-	if err != nil {
-		return err
+func (l DefaultLogger) Error(v ...interface{}) {
+	fmt.Println(v...)
+}
+
+func NewServer(options ...ServerOption) *Server {
+	s := &Server{}
+	for _, option := range options {
+		option(s)
 	}
-	return s.Serve(l)
-}
 
-// Serve is used to serve connections from a listener
-func (s *Server) Serve(l net.Listener) error {
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			return err
-		}
-		go s.ServeConn(conn)
+	if s.Logger == nil {
+		s.Logger = DefaultLogger{}
 	}
+
+	return s
 }
 
-// ServeConn is used to serve a single connection.
-func (s *Server) ServeConn(conn net.Conn) {
-	defer conn.Close()
-	err := s.serveConn(conn)
-	if err != nil && s.Logger != nil && !isClosedConnError(err) {
-		s.Logger.Println(err)
+type ServerOption func(*Server)
+
+func WithLogger(logger Logger) ServerOption {
+	return func(s *Server) {
+		s.Logger = logger
 	}
 }
 
-func (s *Server) serveConn(conn net.Conn) error {
+func (s *Server) ServeConn(conn net.Conn) error {
 	version, err := readByte(conn)
 	if err != nil {
 		return err
@@ -89,12 +84,6 @@ func (s *Server) serveConn(conn net.Conn) error {
 	}
 	req.DestinationAddr = &addr.address
 	req.Username = addr.Username
-	if s.Authentication != nil && !s.Authentication.Auth(req.Command, req.Username) {
-		if err := sendReply(req.Conn, invalidUserReply, nil); err != nil {
-			return fmt.Errorf("failed to send reply: %v", err)
-		}
-		return errUserAuthFailed
-	}
 	return s.handle(req)
 }
 
