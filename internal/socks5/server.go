@@ -10,8 +10,6 @@ import (
 
 // Server is accepting connections and handling the details of the SOCKS5 protocol
 type Server struct {
-	// Authentication is proxy authentication
-	Authentication Authentication
 	// ProxyDial specifies the optional proxyDial function for
 	// establishing the transport connection.
 	ProxyDial func(ctx context.Context, network string, address string) (net.Conn, error)
@@ -32,53 +30,42 @@ type Server struct {
 }
 
 type Logger interface {
-	Println(v ...interface{})
+	Debug(v ...interface{})
+	Error(v ...interface{})
 }
 
-// NewServer creates a new Server
-func NewServer() *Server {
-	return &Server{}
+type DefaultLogger struct{}
+
+func (l DefaultLogger) Debug(v ...interface{}) {
+	fmt.Println(v...)
 }
 
-// ListenAndServe is used to create a listener and serve on it
-func (s *Server) ListenAndServe(network, addr string) error {
-	l, err := s.proxyListen(s.context(), network, addr)
-	if err != nil {
-		return err
+func (l DefaultLogger) Error(v ...interface{}) {
+	fmt.Println(v...)
+}
+
+func NewServer(options ...ServerOption) *Server {
+	s := &Server{}
+	for _, option := range options {
+		option(s)
 	}
-	return s.Serve(l)
-}
 
-func (s *Server) proxyListen(ctx context.Context, network, address string) (net.Listener, error) {
-	proxyListen := s.ProxyListen
-	if proxyListen == nil {
-		var listenConfig net.ListenConfig
-		proxyListen = listenConfig.Listen
+	if s.Logger == nil {
+		s.Logger = DefaultLogger{}
 	}
-	return proxyListen(ctx, network, address)
+
+	return s
 }
 
-// Serve is used to serve connections from a listener
-func (s *Server) Serve(l net.Listener) error {
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			return err
-		}
-		go s.ServeConn(conn)
+type ServerOption func(*Server)
+
+func WithLogger(logger Logger) ServerOption {
+	return func(s *Server) {
+		s.Logger = logger
 	}
 }
 
-// ServeConn is used to serve a single connection.
-func (s *Server) ServeConn(conn net.Conn) {
-	defer conn.Close()
-	err := s.serveConn(conn)
-	if err != nil && s.Logger != nil && !isClosedConnError(err) {
-		s.Logger.Println(err)
-	}
-}
-
-func (s *Server) serveConn(conn net.Conn) error {
+func (s *Server) ServeConn(conn net.Conn) error {
 	version, err := readByte(conn)
 	if err != nil {
 		return err
@@ -97,44 +84,7 @@ func (s *Server) serveConn(conn net.Conn) error {
 		return err
 	}
 
-	if s.Authentication != nil && bytes.IndexByte(methods, byte(userAuth)) != -1 {
-		_, err := conn.Write([]byte{socks5Version, byte(userAuth)})
-		if err != nil {
-			return err
-		}
-
-		header, err := readByte(conn)
-		if err != nil {
-			return err
-		}
-		if header != userAuthVersion {
-			return fmt.Errorf("unsupported auth version: %d", header)
-		}
-
-		username, err := readBytes(conn)
-		if err != nil {
-			return err
-		}
-		req.Username = string(username)
-
-		password, err := readBytes(conn)
-		if err != nil {
-			return err
-		}
-		req.Password = string(password)
-
-		if !s.Authentication.Auth(req.Command, req.Username, req.Password) {
-			_, err := conn.Write([]byte{userAuthVersion, authFailure})
-			if err != nil {
-				return err
-			}
-			return errUserAuthFailed
-		}
-		_, err = conn.Write([]byte{userAuthVersion, authSuccess})
-		if err != nil {
-			return err
-		}
-	} else if s.Authentication == nil && bytes.IndexByte(methods, byte(noAuth)) != -1 {
+	if bytes.IndexByte(methods, byte(noAuth)) != -1 {
 		_, err := conn.Write([]byte{socks5Version, byte(noAuth)})
 		if err != nil {
 			return err
@@ -353,9 +303,7 @@ func (s *Server) handleAssociate(req *request) error {
 			reader := bytes.NewBuffer(buf[3:n])
 			addr, err := readAddr(reader)
 			if err != nil {
-				if s.Logger != nil {
-					s.Logger.Println(err)
-				}
+				s.Logger.Debug(err)
 				continue
 			}
 			if targetAddr == nil {
@@ -366,9 +314,7 @@ func (s *Server) handleAssociate(req *request) error {
 				wantTarget = targetAddr.String()
 			}
 			if addr.String() != wantTarget {
-				if s.Logger != nil {
-					s.Logger.Println(fmt.Errorf("ignore non-target addresses %s", addr))
-				}
+				s.Logger.Debug(fmt.Errorf("ignore non-target addresses %s", addr))
 				continue
 			}
 			_, err = udpConn.WriteTo(reader.Bytes(), targetAddr)

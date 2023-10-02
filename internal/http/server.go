@@ -3,107 +3,71 @@ package http
 import (
 	"bufio"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"time"
 )
 
 type Server struct {
-	auth Authenticator
 }
 
 func NewServer() *Server {
-	return &Server{
-		auth: NewBasicAuthenticator(),
-	}
+	return &Server{}
 }
 
-func (s *Server) ServeConn(conn net.Conn) {
-	defer conn.Close()
+func (s *Server) ServeConn(conn net.Conn) error {
+	defer func() {
+		_ = conn.Close()
+	}()
 	SetTimeout(conn, 5*time.Minute) // Set a timeout of 5 minutes
 
 	reader := bufio.NewReader(conn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
-		log.Println(err)
-		return
+		return err
 	}
 
-	err = CheckAuth(s.auth, req)
+	return handleHTTP(conn, req, req.Method == http.MethodConnect)
+}
+
+func handleHTTP(conn net.Conn, req *http.Request, isConnectMethod bool) error {
+	targetConn, err := net.Dial("tcp", req.URL.Host)
 	if err != nil {
 		http.Error(
 			NewHTTPResponseWriter(conn),
 			err.Error(),
-			http.StatusUnauthorized,
+			http.StatusServiceUnavailable,
 		)
-		return
+		return err
 	}
+	defer func() {
+		_ = targetConn.Close()
+	}()
 
-	if req.Method == http.MethodConnect {
-		handleHTTPConnect(conn, req)
+	if isConnectMethod {
+		_, err = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		if err != nil {
+			return err
+		}
 	} else {
-		handleHTTP(conn, req)
-	}
-}
-
-func handleHTTPConnect(conn net.Conn, req *http.Request) {
-	targetConn, err := net.Dial("tcp", req.URL.Host)
-	if err != nil {
-		http.Error(
-			NewHTTPResponseWriter(conn),
-			err.Error(),
-			http.StatusServiceUnavailable,
-		)
-		return
-	}
-	defer targetConn.Close()
-
-	conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-
-	errCh := make(chan error, 2)
-	buf1 := make([]byte, 32*1024)
-	buf2 := make([]byte, 32*1024)
-	go proxy(conn, targetConn, buf1, errCh)
-	go proxy(targetConn, conn, buf2, errCh)
-
-	err = <-errCh
-	if err != nil && err != io.EOF {
-		log.Println(err)
-	}
-}
-
-func handleHTTP(conn net.Conn, req *http.Request) {
-	targetConn, err := net.Dial("tcp", req.URL.Host)
-	if err != nil {
-		http.Error(
-			NewHTTPResponseWriter(conn),
-			err.Error(),
-			http.StatusServiceUnavailable,
-		)
-		return
-	}
-	defer targetConn.Close()
-
-	err = req.Write(targetConn)
-	if err != nil {
-		log.Println(err)
-		return
+		err = req.Write(targetConn)
+		if err != nil {
+			return err
+		}
 	}
 
 	errCh := make(chan error, 2)
-	buf1 := make([]byte, 32*1024)
-	buf2 := make([]byte, 32*1024)
-	go proxy(conn, targetConn, buf1, errCh)
-	go proxy(targetConn, conn, buf2, errCh)
+	go proxy(conn, targetConn, errCh)
+	go proxy(targetConn, conn, errCh)
 
 	err = <-errCh
 	if err != nil && err != io.EOF {
-		log.Println(err)
+		return err
 	}
+	return nil
 }
 
-func proxy(src, dst net.Conn, buf []byte, errCh chan error) {
-	_, err := CopyBuffer(dst, src, buf)
+func proxy(src, dst net.Conn, errCh chan error) {
+	_, err := CopyBuffer(dst, src, make([]byte, 32*1024))
 	errCh <- err
 }
