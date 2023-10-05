@@ -3,6 +3,7 @@ package socks4
 import (
 	"context"
 	"fmt"
+	"github.com/bepass-org/proxy/internal/statute"
 	"io"
 	"net"
 )
@@ -11,28 +12,17 @@ import (
 type Server struct {
 	// ProxyDial specifies the optional proxyDial function for
 	// establishing the transport connection.
-	ProxyDial func(ctx context.Context, network string, address string) (net.Conn, error)
+	ProxyDial statute.ProxyDialFunc
+	// UserConnectHandle gives the user control to handle the TCP CONNECT requests
+	UserConnectHandle statute.UserConnectHandler
+	// UserAssociateHandle gives the user control to handle the TCP BIND requests
+	UserBindHandle statute.UserBindHandler
 	// Logger error log
-	Logger Logger
+	Logger statute.Logger
 	// Context is default context
 	Context context.Context
 	// BytesPool getting and returning temporary bytes for use by io.CopyBuffer
 	BytesPool BytesPool
-}
-
-type Logger interface {
-	Debug(v ...interface{})
-	Error(v ...interface{})
-}
-
-type DefaultLogger struct{}
-
-func (l DefaultLogger) Debug(v ...interface{}) {
-	fmt.Println(v...)
-}
-
-func (l DefaultLogger) Error(v ...interface{}) {
-	fmt.Println(v...)
 }
 
 func NewServer(options ...ServerOption) *Server {
@@ -42,7 +32,7 @@ func NewServer(options ...ServerOption) *Server {
 	}
 
 	if s.Logger == nil {
-		s.Logger = DefaultLogger{}
+		s.Logger = statute.DefaultLogger{}
 	}
 
 	return s
@@ -50,9 +40,27 @@ func NewServer(options ...ServerOption) *Server {
 
 type ServerOption func(*Server)
 
-func WithLogger(logger Logger) ServerOption {
+func WithLogger(logger statute.Logger) ServerOption {
 	return func(s *Server) {
 		s.Logger = logger
+	}
+}
+
+func WithConnectHandle(handler statute.UserConnectHandler) ServerOption {
+	return func(s *Server) {
+		s.UserConnectHandle = handler
+	}
+}
+
+func WithBindHandle(handler statute.UserBindHandler) ServerOption {
+	return func(s *Server) {
+		s.UserBindHandle = handler
+	}
+}
+
+func WithProxyDial(proxyDial statute.ProxyDialFunc) ServerOption {
+	return func(s *Server) {
+		s.ProxyDial = proxyDial
 	}
 }
 
@@ -102,6 +110,32 @@ func (s *Server) handle(req *request) error {
 }
 
 func (s *Server) handleConnect(req *request) error {
+	if s.UserConnectHandle == nil {
+		return s.embedHandleConnect(req)
+	}
+
+	if err := sendReply(req.Conn, grantedReply, nil); err != nil {
+		return fmt.Errorf("failed to send reply: %v", err)
+	}
+	host := req.DestinationAddr.IP.String()
+	if req.DestinationAddr.Name != "" {
+		host = req.DestinationAddr.Name
+	}
+
+	proxyReq := &statute.ProxyRequest{
+		Conn:        req.Conn,
+		Reader:      io.Reader(req.Conn),
+		Writer:      io.Writer(req.Conn),
+		Network:     "tcp",
+		Destination: req.DestinationAddr.String(),
+		DestHost:    host,
+		DestPort:    int32(req.DestinationAddr.Port),
+	}
+
+	return s.UserConnectHandle(proxyReq)
+}
+
+func (s *Server) embedHandleConnect(req *request) error {
 	ctx := s.context()
 	target, err := s.proxyDial(ctx, "tcp", req.DestinationAddr.Address())
 	if err != nil {
@@ -146,24 +180,24 @@ func (s *Server) handleBind(req *request) error {
 	localAddr := listener.Addr()
 	local, ok := localAddr.(*net.TCPAddr)
 	if !ok {
-		listener.Close()
+		_ = listener.Close()
 		return fmt.Errorf("connect to %v failed: local address is %s://%s", req.DestinationAddr, localAddr.Network(), localAddr.String())
 	}
 	bind := address{IP: local.IP, Port: local.Port}
 	if err := sendReply(req.Conn, grantedReply, &bind); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return fmt.Errorf("failed to send reply: %v", err)
 	}
 
 	conn, err := listener.Accept()
 	if err != nil {
-		listener.Close()
+		_ = listener.Close()
 		if err := sendReply(req.Conn, rejectedReply, nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-	listener.Close()
+	_ = listener.Close()
 
 	remoteAddr := conn.RemoteAddr()
 	local, ok = remoteAddr.(*net.TCPAddr)

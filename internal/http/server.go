@@ -2,24 +2,51 @@ package http
 
 import (
 	"bufio"
+	"github.com/bepass-org/proxy/internal/statute"
 	"io"
 	"net"
 	"net/http"
-	"time"
+	"strconv"
 )
 
 type Server struct {
+	// UserConnectHandle gives the user control to handle the TCP CONNECT requests
+	UserConnectHandle statute.UserConnectHandler
+	// Logger error log
+	Logger statute.Logger
 }
 
-func NewServer() *Server {
-	return &Server{}
+func NewServer(options ...ServerOption) *Server {
+	s := &Server{}
+	for _, option := range options {
+		option(s)
+	}
+
+	if s.Logger == nil {
+		s.Logger = statute.DefaultLogger{}
+	}
+
+	return s
+}
+
+type ServerOption func(*Server)
+
+func WithLogger(logger statute.Logger) ServerOption {
+	return func(s *Server) {
+		s.Logger = logger
+	}
+}
+
+func WithConnectHandle(handler statute.UserConnectHandler) ServerOption {
+	return func(s *Server) {
+		s.UserConnectHandle = handler
+	}
 }
 
 func (s *Server) ServeConn(conn net.Conn) error {
 	defer func() {
 		_ = conn.Close()
 	}()
-	SetTimeout(conn, 5*time.Minute) // Set a timeout of 5 minutes
 
 	reader := bufio.NewReader(conn)
 	req, err := http.ReadRequest(reader)
@@ -27,10 +54,67 @@ func (s *Server) ServeConn(conn net.Conn) error {
 		return err
 	}
 
-	return handleHTTP(conn, req, req.Method == http.MethodConnect)
+	return s.handleHTTP(conn, req, req.Method == http.MethodConnect)
 }
 
-func handleHTTP(conn net.Conn, req *http.Request, isConnectMethod bool) error {
+func (s *Server) handleHTTP(conn net.Conn, req *http.Request, isConnectMethod bool) error {
+	if s.UserConnectHandle == nil {
+		return s.embedHandleHTTP(conn, req, isConnectMethod)
+	}
+
+	reader := bufio.NewReader(conn)
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		return err
+	}
+
+	isConnect := req.Method == http.MethodConnect
+	targetAddr := req.URL.Host
+
+	if isConnect {
+		_, err = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		if err != nil {
+			return err
+		}
+	} else {
+		cConn := &customConn{
+			Conn: conn,
+			req:  req,
+		}
+		conn = cConn
+	}
+
+	host, portStr, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		host = targetAddr
+		if req.URL.Scheme == "https" || isConnect {
+			portStr = "443"
+		} else {
+			portStr = "80"
+		}
+		targetAddr = net.JoinHostPort(host, portStr)
+	}
+
+	portInt, err := strconv.Atoi(portStr)
+	if err != nil {
+		return err // Handle the error if the port string is not a valid integer.
+	}
+	port := int32(portInt)
+
+	proxyReq := &statute.ProxyRequest{
+		Conn:        conn,
+		Reader:      io.Reader(conn),
+		Writer:      io.Writer(conn),
+		Network:     "tcp",
+		Destination: targetAddr,
+		DestHost:    host,
+		DestPort:    port,
+	}
+
+	return s.UserConnectHandle(proxyReq)
+}
+
+func (s *Server) embedHandleHTTP(conn net.Conn, req *http.Request, isConnectMethod bool) error {
 	targetConn, err := net.Dial("tcp", req.URL.Host)
 	if err != nil {
 		http.Error(
@@ -68,6 +152,6 @@ func handleHTTP(conn net.Conn, req *http.Request, isConnectMethod bool) error {
 }
 
 func proxy(src, dst net.Conn, errCh chan error) {
-	_, err := CopyBuffer(dst, src, make([]byte, 32*1024))
+	_, err := copyBuffer(dst, src, make([]byte, 32*1024))
 	errCh <- err
 }

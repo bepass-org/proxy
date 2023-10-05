@@ -1,22 +1,16 @@
 package http
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"time"
+	"sync"
 )
 
-// SetTimeout sets a read and write deadline on a net.Conn.
-func SetTimeout(conn net.Conn, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	conn.SetReadDeadline(deadline)
-	conn.SetWriteDeadline(deadline)
-}
-
-// CopyBuffer is a helper function to copy data between two net.Conn objects.
-func CopyBuffer(dst, src net.Conn, buf []byte) (int64, error) {
+// copyBuffer is a helper function to copy data between two net.Conn objects.
+func copyBuffer(dst, src net.Conn, buf []byte) (int64, error) {
 	return io.CopyBuffer(dst, src, buf)
 }
 
@@ -50,9 +44,9 @@ func (rw *responseWriter) WriteHeader(statusCode int) {
 	if statusText == "" {
 		statusText = fmt.Sprintf("status code %d", statusCode)
 	}
-	fmt.Fprintf(rw.conn, "HTTP/1.1 %d %s\r\n", statusCode, statusText)
-	rw.headers.Write(rw.conn)
-	rw.conn.Write([]byte("\r\n"))
+	_, _ = fmt.Fprintf(rw.conn, "HTTP/1.1 %d %s\r\n", statusCode, statusText)
+	_ = rw.headers.Write(rw.conn)
+	_, _ = rw.conn.Write([]byte("\r\n"))
 }
 
 func (rw *responseWriter) Write(data []byte) (int, error) {
@@ -60,4 +54,31 @@ func (rw *responseWriter) Write(data []byte) (int, error) {
 		rw.WriteHeader(http.StatusOK)
 	}
 	return rw.conn.Write(data)
+}
+
+type customConn struct {
+	net.Conn
+	req         *http.Request
+	initialData []byte
+	once        sync.Once
+}
+
+func (c *customConn) Write(p []byte) (n int, err error) {
+	c.once.Do(func() {
+		buf := &bytes.Buffer{}
+		err = c.req.Write(buf)
+		if err != nil {
+			n = 0
+			return
+		}
+		c.initialData = buf.Bytes()
+	})
+
+	if len(c.initialData) > 0 {
+		n, err = c.Conn.Write(c.initialData)
+		c.initialData = nil
+		return
+	}
+
+	return c.Conn.Write(p)
 }

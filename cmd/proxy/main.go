@@ -5,6 +5,7 @@ import (
 	"github.com/bepass-org/proxy/internal/http"
 	"github.com/bepass-org/proxy/internal/socks4"
 	"github.com/bepass-org/proxy/internal/socks5"
+	"github.com/bepass-org/proxy/internal/statute"
 	"log"
 	"net"
 )
@@ -17,7 +18,9 @@ var (
 
 func init() {
 	socks5Server = socks5.NewServer()
-	socks4Server = socks4.NewServer()
+	socks4Server = socks4.NewServer(
+		socks4.WithConnectHandle(generalHandler),
+	)
 	httpServer = http.NewServer()
 }
 
@@ -109,4 +112,8 @@ func handleHttpConnection(conn net.Conn) {
 	if err != nil {
 		log.Println(err)
 	}
+}
+
+func generalHandler(req *statute.ProxyRequest) error {
+	return nil
 }

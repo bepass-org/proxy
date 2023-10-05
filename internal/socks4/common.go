@@ -118,17 +118,6 @@ func readBytes(r io.Reader) ([]byte, error) {
 	}
 }
 
-func writeBytes(w io.Writer, b []byte) error {
-	if len(b) != 0 {
-		_, err := w.Write(b)
-		if err != nil {
-			return err
-		}
-	}
-	_, err := w.Write([]byte{0})
-	return err
-}
-
 func readByte(r io.Reader) (byte, error) {
 	var buf [1]byte
 	_, err := r.Read(buf[:])
@@ -168,59 +157,6 @@ func readAddrAndUser(r io.Reader) (*AddrAnfUser, error) {
 	return address, nil
 }
 
-func writeAddrAndUser(w io.Writer, addr *AddrAnfUser) error {
-	var port [2]byte
-	binary.BigEndian.PutUint16(port[:], uint16(addr.Port))
-	_, err := w.Write(port[:])
-	if err != nil {
-		return err
-	}
-
-	socks4a := false
-	ip := addr.IP.To4()
-	if ip == nil {
-		if addr.Name != "" {
-			socks4a = true
-			_, err = w.Write(isSocks4a)
-		} else {
-			_, err = w.Write(isNone)
-		}
-	} else {
-		_, err = w.Write(ip)
-	}
-	if err != nil {
-		return err
-	}
-
-	err = writeBytes(w, []byte(addr.Username))
-	if err != nil {
-		return err
-	}
-
-	if socks4a {
-		err = writeBytes(w, []byte(addr.Name))
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func readAddr(r io.Reader) (*address, error) {
-	address := &address{}
-	var port [2]byte
-	if _, err := io.ReadFull(r, port[:]); err != nil {
-		return nil, err
-	}
-	address.Port = int(binary.BigEndian.Uint16(port[:]))
-	addr := make(net.IP, net.IPv4len)
-	if _, err := io.ReadFull(r, addr); err != nil {
-		return nil, err
-	}
-	address.IP = addr
-	return address, nil
-}
-
 func writeAddr(w io.Writer, addr *address) error {
 	var ip net.IP
 	var port uint16
@@ -241,32 +177,6 @@ func writeAddr(w io.Writer, addr *address) error {
 		_, err = w.Write(ip)
 	}
 	return err
-}
-
-func writeAddrAndUserWithStr(w io.Writer, addr, username string) error {
-	host, port, err := splitHostPort(addr)
-	if err != nil {
-		return err
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return writeAddrAndUser(w, &AddrAnfUser{address: address{IP: ip, Port: port}, Username: username})
-	}
-	return writeAddrAndUser(w, &AddrAnfUser{address: address{Name: host, Port: port}, Username: username})
-}
-
-func splitHostPort(address string) (string, int, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return "", 0, err
-	}
-	portnum, err := strconv.Atoi(port)
-	if err != nil {
-		return "", 0, err
-	}
-	if 1 > portnum || portnum > 0xffff {
-		return "", 0, errors.New("port number out of range " + port)
-	}
-	return host, portnum, nil
 }
 
 // isClosedConnError reports whether err is an error from use of a closed
