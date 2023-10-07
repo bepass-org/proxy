@@ -60,13 +60,6 @@ func (c *SwitchConn) Read(p []byte) (n int, err error) {
 }
 
 func handleConnection(conn net.Conn) {
-	defer func() {
-		err := conn.Close()
-		if err != nil {
-			log.Println(err)
-		}
-	}()
-
 	// Create a SwitchConn
 	switchConn := NewSwitchConn(conn)
 

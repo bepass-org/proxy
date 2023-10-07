@@ -44,10 +44,6 @@ func WithConnectHandle(handler statute.UserConnectHandler) ServerOption {
 }
 
 func (s *Server) ServeConn(conn net.Conn) error {
-	defer func() {
-		_ = conn.Close()
-	}()
-
 	reader := bufio.NewReader(conn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
@@ -115,6 +111,9 @@ func (s *Server) handleHTTP(conn net.Conn, req *http.Request, isConnectMethod bo
 }
 
 func (s *Server) embedHandleHTTP(conn net.Conn, req *http.Request, isConnectMethod bool) error {
+	defer func() {
+		_ = conn.Close()
+	}()
 	targetConn, err := net.Dial("tcp", req.URL.Host)
 	if err != nil {
 		http.Error(

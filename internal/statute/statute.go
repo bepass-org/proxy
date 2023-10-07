@@ -35,9 +35,6 @@ type ProxyRequest struct {
 // UserConnectHandler is used for socks5, socks4 and http
 type UserConnectHandler func(request *ProxyRequest) error
 
-// UserBindHandler is used for socks5 and socks4
-type UserBindHandler func(request *ProxyRequest) error
-
 // UserAssociateHandler is used for socks5
 type UserAssociateHandler func(request *ProxyRequest) error
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"io"
 	"net"
 	"os"
@@ -12,10 +11,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-)
-
-var (
-	errUserAuthFailed = errors.New("user authentication failed")
 )
 
 var (
@@ -29,7 +24,6 @@ const (
 
 const (
 	ConnectCommand Command = 0x01
-	BindCommand    Command = 0x02
 )
 
 // Command is a SOCKS Command.
@@ -39,8 +33,6 @@ func (cmd Command) String() string {
 	switch cmd {
 	case ConnectCommand:
 		return "socks connect"
-	case BindCommand:
-		return "socks bind"
 	default:
 		return "socks " + strconv.Itoa(int(cmd))
 	}

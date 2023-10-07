@@ -15,8 +15,6 @@ type Server struct {
 	ProxyDial statute.ProxyDialFunc
 	// UserConnectHandle gives the user control to handle the TCP CONNECT requests
 	UserConnectHandle statute.UserConnectHandler
-	// UserAssociateHandle gives the user control to handle the TCP BIND requests
-	UserBindHandle statute.UserBindHandler
 	// Logger error log
 	Logger statute.Logger
 	// Context is default context
@@ -49,12 +47,6 @@ func WithLogger(logger statute.Logger) ServerOption {
 func WithConnectHandle(handler statute.UserConnectHandler) ServerOption {
 	return func(s *Server) {
 		s.UserConnectHandle = handler
-	}
-}
-
-func WithBindHandle(handler statute.UserBindHandler) ServerOption {
-	return func(s *Server) {
-		s.UserBindHandle = handler
 	}
 }
 
@@ -99,8 +91,6 @@ func (s *Server) handle(req *request) error {
 	switch req.Command {
 	case ConnectCommand:
 		return s.handleConnect(req)
-	case BindCommand:
-		return s.handleBind(req)
 	default:
 		if err := sendReply(req.Conn, rejectedReply, nil); err != nil {
 			return err
@@ -136,6 +126,9 @@ func (s *Server) handleConnect(req *request) error {
 }
 
 func (s *Server) embedHandleConnect(req *request) error {
+	defer func() {
+		_ = req.Conn.Close()
+	}()
 	ctx := s.context()
 	target, err := s.proxyDial(ctx, "tcp", req.DestinationAddr.Address())
 	if err != nil {
@@ -144,7 +137,9 @@ func (s *Server) embedHandleConnect(req *request) error {
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-
+	defer func() {
+		_ = target.Close()
+	}()
 	local := target.LocalAddr().(*net.TCPAddr)
 	bind := address{IP: local.IP, Port: local.Port}
 	if err := sendReply(req.Conn, grantedReply, &bind); err != nil {
@@ -164,64 +159,6 @@ func (s *Server) embedHandleConnect(req *request) error {
 		buf2 = make([]byte, 32*1024)
 	}
 	return tunnel(ctx, target, req.Conn, buf1, buf2)
-}
-
-func (s *Server) handleBind(req *request) error {
-	ctx := s.context()
-	var lc net.ListenConfig
-	listener, err := lc.Listen(ctx, "tcp", req.DestinationAddr.String())
-	if err != nil {
-		if err := sendReply(req.Conn, rejectedReply, nil); err != nil {
-			return fmt.Errorf("failed to send reply: %v", err)
-		}
-		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
-	}
-
-	localAddr := listener.Addr()
-	local, ok := localAddr.(*net.TCPAddr)
-	if !ok {
-		_ = listener.Close()
-		return fmt.Errorf("connect to %v failed: local address is %s://%s", req.DestinationAddr, localAddr.Network(), localAddr.String())
-	}
-	bind := address{IP: local.IP, Port: local.Port}
-	if err := sendReply(req.Conn, grantedReply, &bind); err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("failed to send reply: %v", err)
-	}
-
-	conn, err := listener.Accept()
-	if err != nil {
-		_ = listener.Close()
-		if err := sendReply(req.Conn, rejectedReply, nil); err != nil {
-			return fmt.Errorf("failed to send reply: %v", err)
-		}
-		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
-	}
-	_ = listener.Close()
-
-	remoteAddr := conn.RemoteAddr()
-	local, ok = remoteAddr.(*net.TCPAddr)
-	if !ok {
-		return fmt.Errorf("connect to %v failed: remote address is %s://%s", req.DestinationAddr, localAddr.Network(), localAddr.String())
-	}
-	bind = address{IP: local.IP, Port: local.Port}
-	if err := sendReply(req.Conn, grantedReply, &bind); err != nil {
-		return fmt.Errorf("failed to send reply: %v", err)
-	}
-
-	var buf1, buf2 []byte
-	if s.BytesPool != nil {
-		buf1 = s.BytesPool.Get()
-		buf2 = s.BytesPool.Get()
-		defer func() {
-			s.BytesPool.Put(buf1)
-			s.BytesPool.Put(buf2)
-		}()
-	} else {
-		buf1 = make([]byte, 32*1024)
-		buf2 = make([]byte, 32*1024)
-	}
-	return tunnel(ctx, conn, req.Conn, buf1, buf2)
 }
 
 func (s *Server) proxyDial(ctx context.Context, network, address string) (net.Conn, error) {
