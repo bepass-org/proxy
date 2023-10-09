@@ -1,9 +1,11 @@
 package socks5
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var (
@@ -30,7 +33,6 @@ const (
 
 const (
 	ConnectCommand   Command = 0x01
-	BindCommand      Command = 0x02
 	AssociateCommand Command = 0x03
 )
 
@@ -41,8 +43,6 @@ func (cmd Command) String() string {
 	switch cmd {
 	case ConnectCommand:
 		return "socks connect"
-	case BindCommand:
-		return "socks bind"
 	case AssociateCommand:
 		return "socks associate"
 	default:
@@ -373,4 +373,120 @@ func (t tunnelErr) FirstError() error {
 type BytesPool interface {
 	Get() []byte
 	Put([]byte)
+}
+
+type readStruct struct {
+	data []byte
+	err  error
+}
+
+type udpCustomConn struct {
+	net.PacketConn
+	assocTCPConn net.Conn
+	lock         sync.Mutex
+	sourceAddr   net.Addr
+	targetAddr   net.Addr
+	replyPrefix  []byte
+	firstRead    sync.Once
+	frc          chan bool
+	packetQueue  chan *readStruct
+}
+
+func (cc *udpCustomConn) RemoteAddr() net.Addr {
+	return cc.targetAddr
+}
+
+func (cc *udpCustomConn) asyncReadPackets() {
+	go func() {
+		for {
+			tempBuf := make([]byte, maxUdpPacket)
+			n, addr, err := cc.ReadFrom(tempBuf)
+			if err != nil {
+				cc.packetQueue <- &readStruct{
+					data: nil,
+					err:  err,
+				}
+				break
+			}
+			if cc.sourceAddr == nil {
+				cc.sourceAddr = addr
+			}
+			packetData := tempBuf[:n]
+			if len(packetData) < 3 {
+				cc.packetQueue <- &readStruct{
+					data: nil,
+					err:  err,
+				}
+				break
+			}
+			reader := bytes.NewBuffer(packetData[3:])
+			targetAddr, err := readAddr(reader)
+
+			if err != nil {
+				cc.packetQueue <- &readStruct{
+					data: nil,
+					err:  err,
+				}
+				break
+			}
+			if cc.targetAddr == nil {
+				cc.targetAddr = &net.UDPAddr{
+					IP:   targetAddr.IP,
+					Port: targetAddr.Port,
+				}
+			}
+			if targetAddr.String() != cc.targetAddr.String() {
+				cc.packetQueue <- &readStruct{
+					data: nil,
+					err:  fmt.Errorf("ignore non-target addresses %s", targetAddr.String()),
+				}
+				break
+			}
+			cc.firstRead.Do(func() {
+				// ok we have source and destination address now user can handle new ProxyReq
+				cc.frc <- true
+			})
+			cc.packetQueue <- &readStruct{
+				data: reader.Bytes(),
+				err:  nil,
+			}
+		}
+	}()
+}
+
+func (cc *udpCustomConn) Read(b []byte) (int, error) {
+	// wait for packet data
+	read := <-cc.packetQueue
+	if read.err != nil {
+		return 0, read.err
+	}
+	copy(b, read.data)
+	return len(read.data), nil
+}
+
+func (cc *udpCustomConn) Write(b []byte) (int, error) {
+	cc.lock.Lock()
+	defer cc.lock.Unlock()
+	if cc.replyPrefix == nil {
+		prefix := bytes.NewBuffer(make([]byte, 3, 16))
+		err := writeAddrWithStr(prefix, cc.targetAddr.String())
+		if err != nil {
+			return 0, err
+		}
+		cc.replyPrefix = prefix.Bytes()
+	}
+	buff := append(cc.replyPrefix, b...)
+	_, err := cc.WriteTo(buff[:len(cc.replyPrefix)+len(b)], cc.sourceAddr)
+	return len(b), err
+}
+
+func (cc *udpCustomConn) Close() error {
+	cc.lock.Lock()
+	defer cc.lock.Unlock()
+	udpErr := cc.Close()
+	tcpErr := cc.assocTCPConn.Close()
+	if udpErr != nil {
+		return udpErr
+	}
+	return tcpErr
 }

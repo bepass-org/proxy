@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/bepass-org/proxy/internal/statute"
 	"io"
 	"net"
 )
@@ -21,6 +22,10 @@ type Server struct {
 	ProxyListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
 	// PacketForwardAddress specifies the packet forwarding address
 	PacketForwardAddress func(ctx context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error)
+	// UserConnectHandle gives the user control to handle the TCP CONNECT requests
+	UserConnectHandle statute.UserConnectHandler
+	// UserAssociateHandle gives the user control to handle the UDP ASSOCIATE requests
+	UserAssociateHandle statute.UserAssociateHandler
 	// Logger error log
 	Logger Logger
 	// Context is default context
@@ -62,6 +67,24 @@ type ServerOption func(*Server)
 func WithLogger(logger Logger) ServerOption {
 	return func(s *Server) {
 		s.Logger = logger
+	}
+}
+
+func WithConnectHandle(handler statute.UserConnectHandler) ServerOption {
+	return func(s *Server) {
+		s.UserConnectHandle = handler
+	}
+}
+
+func WithAssociateHandle(handler statute.UserAssociateHandler) ServerOption {
+	return func(s *Server) {
+		s.UserAssociateHandle = handler
+	}
+}
+
+func WithProxyDial(proxyDial statute.ProxyDialFunc) ServerOption {
+	return func(s *Server) {
+		s.ProxyDial = proxyDial
 	}
 }
 
@@ -132,8 +155,6 @@ func (s *Server) handle(req *request) error {
 	switch req.Command {
 	case ConnectCommand:
 		return s.handleConnect(req)
-	case BindCommand:
-		return s.handleBind(req)
 	case AssociateCommand:
 		return s.handleAssociate(req)
 	default:
@@ -145,6 +166,36 @@ func (s *Server) handle(req *request) error {
 }
 
 func (s *Server) handleConnect(req *request) error {
+	if s.UserConnectHandle == nil {
+		return s.embedHandleConnect(req)
+	}
+
+	if err := sendReply(req.Conn, successReply, nil); err != nil {
+		return fmt.Errorf("failed to send reply: %v", err)
+	}
+	host := req.DestinationAddr.IP.String()
+	if req.DestinationAddr.Name != "" {
+		host = req.DestinationAddr.Name
+	}
+
+	proxyReq := &statute.ProxyRequest{
+		Conn:        req.Conn,
+		Reader:      io.Reader(req.Conn),
+		Writer:      io.Writer(req.Conn),
+		Network:     "tcp",
+		Destination: req.DestinationAddr.String(),
+		DestHost:    host,
+		DestPort:    int32(req.DestinationAddr.Port),
+	}
+
+	return s.UserConnectHandle(proxyReq)
+}
+
+func (s *Server) embedHandleConnect(req *request) error {
+	defer func() {
+		_ = req.Conn.Close()
+	}()
+
 	ctx := s.context()
 	target, err := s.proxyDial(ctx, "tcp", req.DestinationAddr.Address())
 	if err != nil {
@@ -153,7 +204,9 @@ func (s *Server) handleConnect(req *request) error {
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-	defer target.Close()
+	defer func() {
+		_ = target.Close()
+	}()
 
 	localAddr := target.LocalAddr()
 	local, ok := localAddr.(*net.TCPAddr)
@@ -180,65 +233,6 @@ func (s *Server) handleConnect(req *request) error {
 	return tunnel(ctx, target, req.Conn, buf1, buf2)
 }
 
-func (s *Server) handleBind(req *request) error {
-	ctx := s.context()
-
-	var lc net.ListenConfig
-	listener, err := lc.Listen(ctx, "tcp", req.DestinationAddr.String())
-	if err != nil {
-		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
-			return fmt.Errorf("failed to send reply: %v", err)
-		}
-		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
-	}
-
-	localAddr := listener.Addr()
-	local, ok := localAddr.(*net.TCPAddr)
-	if !ok {
-		listener.Close()
-		return fmt.Errorf("connect to %v failed: local address is %s://%s", req.DestinationAddr, localAddr.Network(), localAddr.String())
-	}
-	bind := address{IP: local.IP, Port: local.Port}
-	if err := sendReply(req.Conn, successReply, &bind); err != nil {
-		listener.Close()
-		return fmt.Errorf("failed to send reply: %v", err)
-	}
-
-	conn, err := listener.Accept()
-	if err != nil {
-		listener.Close()
-		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
-			return fmt.Errorf("failed to send reply: %v", err)
-		}
-		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
-	}
-	listener.Close()
-
-	remoteAddr := conn.RemoteAddr()
-	local, ok = remoteAddr.(*net.TCPAddr)
-	if !ok {
-		return fmt.Errorf("connect to %v failed: remote address is %s://%s", req.DestinationAddr, localAddr.Network(), localAddr.String())
-	}
-	bind = address{IP: local.IP, Port: local.Port}
-	if err := sendReply(req.Conn, successReply, &bind); err != nil {
-		return fmt.Errorf("failed to send reply: %v", err)
-	}
-
-	var buf1, buf2 []byte
-	if s.BytesPool != nil {
-		buf1 = s.BytesPool.Get()
-		buf2 = s.BytesPool.Get()
-		defer func() {
-			s.BytesPool.Put(buf1)
-			s.BytesPool.Put(buf2)
-		}()
-	} else {
-		buf1 = make([]byte, 32*1024)
-		buf2 = make([]byte, 32*1024)
-	}
-	return tunnel(ctx, conn, req.Conn, buf1, buf2)
-}
-
 func (s *Server) handleAssociate(req *request) error {
 	ctx := s.context()
 	destinationAddr := req.DestinationAddr.String()
@@ -249,7 +243,6 @@ func (s *Server) handleAssociate(req *request) error {
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-	defer udpConn.Close()
 
 	replyPacketForwardAddress := defaultReplyPacketForwardAddress
 	if s.PacketForwardAddress != nil {
@@ -264,12 +257,46 @@ func (s *Server) handleAssociate(req *request) error {
 		return fmt.Errorf("failed to send reply: %v", err)
 	}
 
+	if s.UserAssociateHandle == nil {
+		return s.embedHandleAssociate(req, udpConn)
+	}
+
+	cConn := &udpCustomConn{
+		PacketConn:   udpConn,
+		assocTCPConn: req.Conn,
+		frc:          make(chan bool),
+		packetQueue:  make(chan *readStruct),
+	}
+
+	cConn.asyncReadPackets()
+
+	// wait for first packet so that target sender and receiver get known
+	<-cConn.frc
+
+	proxyReq := &statute.ProxyRequest{
+		Conn:        cConn,
+		Reader:      cConn,
+		Writer:      cConn,
+		Network:     "udp",
+		Destination: cConn.targetAddr.String(),
+		DestHost:    cConn.targetAddr.(*net.UDPAddr).IP.String(),
+		DestPort:    int32(cConn.targetAddr.(*net.UDPAddr).Port),
+	}
+
+	return s.UserAssociateHandle(proxyReq)
+}
+
+func (s *Server) embedHandleAssociate(req *request, udpConn net.PacketConn) error {
+	defer func() {
+		_ = udpConn.Close()
+	}()
+
 	go func() {
 		var buf [1]byte
 		for {
 			_, err := req.Conn.Read(buf[:])
 			if err != nil {
-				udpConn.Close()
+				_ = udpConn.Close()
 				break
 			}
 		}
@@ -383,7 +410,7 @@ type request struct {
 	Conn            net.Conn
 }
 
-func defaultReplyPacketForwardAddress(ctx context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error) {
+func defaultReplyPacketForwardAddress(_ context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error) {
 	udpLocal := packet.LocalAddr()
 	udpLocalAddr, ok := udpLocal.(*net.UDPAddr)
 	if !ok {
