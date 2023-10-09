@@ -387,7 +387,6 @@ type udpCustomConn struct {
 	sourceAddr   net.Addr
 	targetAddr   net.Addr
 	replyPrefix  []byte
-	buf          [maxUdpPacket]byte
 	firstRead    sync.Once
 	frc          chan bool
 	packetQueue  chan *readStruct
@@ -409,14 +408,46 @@ func (cc *udpCustomConn) asyncReadPackets() {
 				}
 				break
 			}
-			cc.lock.Lock()
 			if cc.sourceAddr == nil {
 				cc.sourceAddr = addr
 			}
-			cc.lock.Unlock()
 			packetData := tempBuf[:n]
+			if len(packetData) < 3 {
+				cc.packetQueue <- &readStruct{
+					data: nil,
+					err:  err,
+				}
+				break
+			}
+			reader := bytes.NewBuffer(packetData[3:])
+			targetAddr, err := readAddr(reader)
+
+			if err != nil {
+				cc.packetQueue <- &readStruct{
+					data: nil,
+					err:  err,
+				}
+				break
+			}
+			if cc.targetAddr == nil {
+				cc.targetAddr = &net.UDPAddr{
+					IP:   targetAddr.IP,
+					Port: targetAddr.Port,
+				}
+			}
+			if targetAddr.String() != cc.targetAddr.String() {
+				cc.packetQueue <- &readStruct{
+					data: nil,
+					err:  fmt.Errorf("ignore non-target addresses %s", targetAddr.String()),
+				}
+				break
+			}
+			cc.firstRead.Do(func() {
+				// ok we have source and destination address now user can handle new ProxyReq
+				cc.frc <- true
+			})
 			cc.packetQueue <- &readStruct{
-				data: packetData,
+				data: reader.Bytes(),
 				err:  nil,
 			}
 		}
@@ -424,59 +455,29 @@ func (cc *udpCustomConn) asyncReadPackets() {
 }
 
 func (cc *udpCustomConn) Read(b []byte) (int, error) {
-	cc.lock.Lock()
-	defer cc.lock.Unlock()
-
 	// wait for packet data
 	read := <-cc.packetQueue
-
 	if read.err != nil {
 		return 0, read.err
 	}
-
-	packetData := read.data
-
-	if len(packetData) < 3 {
-		return 0, errors.New("received packet too small")
-	}
-	reader := bytes.NewBuffer(packetData[3:])
-	targetAddr, err := readAddr(reader)
-	if err != nil {
-		return 0, err
-	}
-	if cc.targetAddr == nil {
-		cc.targetAddr = &net.UDPAddr{
-			IP:   targetAddr.IP,
-			Port: targetAddr.Port,
-		}
-	}
-	if targetAddr.String() != cc.targetAddr.String() {
-		return 0, fmt.Errorf("ignore non-target addresses %s", targetAddr.String())
-	}
-	copy(b, reader.Bytes())
-
-	cc.firstRead.Do(func() {
-		// ok we have source and destination address now user can handle new ProxyReq
-		cc.frc <- true
-	})
-
-	return reader.Len(), nil
+	copy(b, read.data)
+	return len(read.data), nil
 }
 
 func (cc *udpCustomConn) Write(b []byte) (int, error) {
 	cc.lock.Lock()
 	defer cc.lock.Unlock()
-
 	if cc.replyPrefix == nil {
-		b := bytes.NewBuffer(make([]byte, 3, 16))
-		err := writeAddrWithStr(b, cc.targetAddr.String())
+		prefix := bytes.NewBuffer(make([]byte, 3, 16))
+		err := writeAddrWithStr(prefix, cc.targetAddr.String())
 		if err != nil {
 			return 0, err
 		}
-		cc.replyPrefix = b.Bytes()
+		cc.replyPrefix = prefix.Bytes()
 	}
-	copy(b, cc.buf[len(cc.replyPrefix):len(cc.replyPrefix)+len(b)])
-	return len(b), nil
+	buff := append(cc.replyPrefix, b...)
+	_, err := cc.WriteTo(buff[:len(cc.replyPrefix)+len(b)], cc.sourceAddr)
+	return len(b), err
 }
 
 func (cc *udpCustomConn) Close() error {

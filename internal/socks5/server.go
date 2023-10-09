@@ -70,6 +70,24 @@ func WithLogger(logger Logger) ServerOption {
 	}
 }
 
+func WithConnectHandle(handler statute.UserConnectHandler) ServerOption {
+	return func(s *Server) {
+		s.UserConnectHandle = handler
+	}
+}
+
+func WithAssociateHandle(handler statute.UserAssociateHandler) ServerOption {
+	return func(s *Server) {
+		s.UserAssociateHandle = handler
+	}
+}
+
+func WithProxyDial(proxyDial statute.ProxyDialFunc) ServerOption {
+	return func(s *Server) {
+		s.ProxyDial = proxyDial
+	}
+}
+
 func (s *Server) ServeConn(conn net.Conn) error {
 	version, err := readByte(conn)
 	if err != nil {
@@ -225,9 +243,6 @@ func (s *Server) handleAssociate(req *request) error {
 		}
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
-	defer func() {
-		_ = udpConn.Close()
-	}()
 
 	replyPacketForwardAddress := defaultReplyPacketForwardAddress
 	if s.PacketForwardAddress != nil {
@@ -250,6 +265,7 @@ func (s *Server) handleAssociate(req *request) error {
 		PacketConn:   udpConn,
 		assocTCPConn: req.Conn,
 		frc:          make(chan bool),
+		packetQueue:  make(chan *readStruct),
 	}
 
 	cConn.asyncReadPackets()
@@ -271,6 +287,10 @@ func (s *Server) handleAssociate(req *request) error {
 }
 
 func (s *Server) embedHandleAssociate(req *request, udpConn net.PacketConn) error {
+	defer func() {
+		_ = udpConn.Close()
+	}()
+
 	go func() {
 		var buf [1]byte
 		for {
