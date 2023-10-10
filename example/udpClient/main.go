@@ -10,7 +10,7 @@ import (
 
 func main() {
 	proxyAddr := "127.0.0.1:1080"
-	targetAddr := "<your server ip>:4444"
+	targetAddr := "<YOUR Netcat ip address>:4444"
 
 	// Connect to SOCKS5 proxy
 	conn, err := net.Dial("tcp", proxyAddr)

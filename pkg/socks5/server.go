@@ -4,59 +4,47 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/bepass-org/proxy/internal/statute"
+	"github.com/bepass-org/proxy/pkg/statute"
 	"io"
 	"net"
 )
 
 // Server is accepting connections and handling the details of the SOCKS5 protocol
 type Server struct {
+	// bind is the address to listen on
+	Bind string
 	// ProxyDial specifies the optional proxyDial function for
 	// establishing the transport connection.
-	ProxyDial func(ctx context.Context, network string, address string) (net.Conn, error)
-	// ProxyListen specifies the optional proxyListen function for
-	// establishing the transport connection.
-	ProxyListen func(context.Context, string, string) (net.Listener, error)
+	ProxyDial statute.ProxyDialFunc
 	// ProxyListenPacket specifies the optional proxyListenPacket function for
 	// establishing the transport connection.
-	ProxyListenPacket func(ctx context.Context, network string, address string) (net.PacketConn, error)
+	ProxyListenPacket statute.ProxyListenPacket
 	// PacketForwardAddress specifies the packet forwarding address
-	PacketForwardAddress func(ctx context.Context, destinationAddr string, packet net.PacketConn, conn net.Conn) (net.IP, int, error)
+	PacketForwardAddress statute.PacketForwardAddress
 	// UserConnectHandle gives the user control to handle the TCP CONNECT requests
 	UserConnectHandle statute.UserConnectHandler
 	// UserAssociateHandle gives the user control to handle the UDP ASSOCIATE requests
 	UserAssociateHandle statute.UserAssociateHandler
 	// Logger error log
-	Logger Logger
+	Logger statute.Logger
 	// Context is default context
 	Context context.Context
 	// BytesPool getting and returning temporary bytes for use by io.CopyBuffer
-	BytesPool BytesPool
-}
-
-type Logger interface {
-	Debug(v ...interface{})
-	Error(v ...interface{})
-}
-
-type DefaultLogger struct{}
-
-func (l DefaultLogger) Debug(v ...interface{}) {
-	fmt.Println(v...)
-}
-
-func (l DefaultLogger) Error(v ...interface{}) {
-	fmt.Println(v...)
+	BytesPool statute.BytesPool
 }
 
 func NewServer(options ...ServerOption) *Server {
-	s := &Server{}
-	for _, option := range options {
-		option(s)
+	s := &Server{
+		Bind:                 statute.DefaultBindAddress,
+		ProxyDial:            statute.DefaultProxyDial(),
+		ProxyListenPacket:    statute.DefaultProxyListenPacket(),
+		PacketForwardAddress: defaultReplyPacketForwardAddress,
+		Logger:               statute.DefaultLogger{},
+		Context:              statute.DefaultContext(),
 	}
 
-	if s.Logger == nil {
-		s.Logger = DefaultLogger{}
+	for _, option := range options {
+		option(s)
 	}
 
 	return s
@@ -64,9 +52,57 @@ func NewServer(options ...ServerOption) *Server {
 
 type ServerOption func(*Server)
 
-func WithLogger(logger Logger) ServerOption {
+func (s *Server) ListenAndServe() error {
+	s.Logger.Debug("Serving on " + s.Bind + " ...")
+	// Create a new listener
+	ln, err := net.Listen("tcp", s.Bind)
+	if err != nil {
+		s.Logger.Error("Error listening on " + s.Bind + ", " + err.Error())
+		return err // Return error if binding was unsuccessful
+	}
+
+	// ensure listener will be closed
+	defer func() {
+		_ = ln.Close()
+	}()
+
+	// Create a cancelable context based on s.Context
+	ctx, cancel := context.WithCancel(s.Context)
+	defer cancel() // Ensure resources are cleaned up
+
+	// Start to accept connections and serve them
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			conn, err := ln.Accept()
+			if err != nil {
+				s.Logger.Error(err)
+				continue
+			}
+
+			// Start a new goroutine to handle each connection
+			// This way, the server can handle multiple connections concurrently
+			go func() {
+				err := s.ServeConn(conn)
+				if err != nil {
+					s.Logger.Error(err) // Log errors from ServeConn
+				}
+			}()
+		}
+	}
+}
+
+func WithLogger(logger statute.Logger) ServerOption {
 	return func(s *Server) {
 		s.Logger = logger
+	}
+}
+
+func WithBind(bindAddress string) ServerOption {
+	return func(s *Server) {
+		s.Bind = bindAddress
 	}
 }
 
@@ -85,6 +121,30 @@ func WithAssociateHandle(handler statute.UserAssociateHandler) ServerOption {
 func WithProxyDial(proxyDial statute.ProxyDialFunc) ServerOption {
 	return func(s *Server) {
 		s.ProxyDial = proxyDial
+	}
+}
+
+func WithProxyListenPacket(proxyListenPacket statute.ProxyListenPacket) ServerOption {
+	return func(s *Server) {
+		s.ProxyListenPacket = proxyListenPacket
+	}
+}
+
+func WithPacketForwardAddress(packetForwardAddress statute.PacketForwardAddress) ServerOption {
+	return func(s *Server) {
+		s.PacketForwardAddress = packetForwardAddress
+	}
+}
+
+func WithContext(ctx context.Context) ServerOption {
+	return func(s *Server) {
+		s.Context = ctx
+	}
+}
+
+func WithBytesPool(bytesPool statute.BytesPool) ServerOption {
+	return func(s *Server) {
+		s.BytesPool = bytesPool
 	}
 }
 
@@ -196,8 +256,7 @@ func (s *Server) embedHandleConnect(req *request) error {
 		_ = req.Conn.Close()
 	}()
 
-	ctx := s.context()
-	target, err := s.proxyDial(ctx, "tcp", req.DestinationAddr.Address())
+	target, err := s.ProxyDial(s.Context, "tcp", req.DestinationAddr.Address())
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
@@ -230,13 +289,12 @@ func (s *Server) embedHandleConnect(req *request) error {
 		buf1 = make([]byte, 32*1024)
 		buf2 = make([]byte, 32*1024)
 	}
-	return tunnel(ctx, target, req.Conn, buf1, buf2)
+	return statute.Tunnel(s.Context, target, req.Conn, buf1, buf2)
 }
 
 func (s *Server) handleAssociate(req *request) error {
-	ctx := s.context()
 	destinationAddr := req.DestinationAddr.String()
-	udpConn, err := s.proxyListenPacket(ctx, "udp", destinationAddr)
+	udpConn, err := s.ProxyListenPacket(s.Context, "udp", destinationAddr)
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
@@ -244,11 +302,7 @@ func (s *Server) handleAssociate(req *request) error {
 		return fmt.Errorf("connect to %v failed: %w", req.DestinationAddr, err)
 	}
 
-	replyPacketForwardAddress := defaultReplyPacketForwardAddress
-	if s.PacketForwardAddress != nil {
-		replyPacketForwardAddress = s.PacketForwardAddress
-	}
-	ip, port, err := replyPacketForwardAddress(ctx, destinationAddr, udpConn, req.Conn)
+	ip, port, err := s.PacketForwardAddress(s.Context, destinationAddr, udpConn, req.Conn)
 	if err != nil {
 		return err
 	}
@@ -365,31 +419,6 @@ func (s *Server) embedHandleAssociate(req *request, udpConn net.PacketConn) erro
 			}
 		}
 	}
-}
-
-func (s *Server) proxyDial(ctx context.Context, network, address string) (net.Conn, error) {
-	proxyDial := s.ProxyDial
-	if proxyDial == nil {
-		var dialer net.Dialer
-		proxyDial = dialer.DialContext
-	}
-	return proxyDial(ctx, network, address)
-}
-
-func (s *Server) proxyListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
-	proxyListenPacket := s.ProxyListenPacket
-	if proxyListenPacket == nil {
-		var listener net.ListenConfig
-		proxyListenPacket = listener.ListenPacket
-	}
-	return proxyListenPacket(ctx, network, address)
-}
-
-func (s *Server) context() context.Context {
-	if s.Context == nil {
-		return context.Background()
-	}
-	return s.Context
 }
 
 func sendReply(w io.Writer, resp reply, addr *address) error {
