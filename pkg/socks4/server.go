@@ -3,13 +3,15 @@ package socks4
 import (
 	"context"
 	"fmt"
-	"github.com/bepass-org/proxy/internal/statute"
+	"github.com/bepass-org/proxy/pkg/statute"
 	"io"
 	"net"
 )
 
 // Server is accepting connections and handling the details of the SOCKS4 protocol
 type Server struct {
+	// bind is the address to listen on
+	Bind string
 	// ProxyDial specifies the optional proxyDial function for
 	// establishing the transport connection.
 	ProxyDial statute.ProxyDialFunc
@@ -20,17 +22,18 @@ type Server struct {
 	// Context is default context
 	Context context.Context
 	// BytesPool getting and returning temporary bytes for use by io.CopyBuffer
-	BytesPool BytesPool
+	BytesPool statute.BytesPool
 }
 
 func NewServer(options ...ServerOption) *Server {
-	s := &Server{}
-	for _, option := range options {
-		option(s)
+	s := &Server{
+		ProxyDial: statute.DefaultProxyDial(),
+		Logger:    statute.DefaultLogger{},
+		Context:   statute.DefaultContext(),
 	}
 
-	if s.Logger == nil {
-		s.Logger = statute.DefaultLogger{}
+	for _, option := range options {
+		option(s)
 	}
 
 	return s
@@ -38,9 +41,57 @@ func NewServer(options ...ServerOption) *Server {
 
 type ServerOption func(*Server)
 
+func (s *Server) ListenAndServe() error {
+	s.Logger.Debug("Serving on " + s.Bind + " ...")
+	// Create a new listener
+	ln, err := net.Listen("tcp", s.Bind)
+	if err != nil {
+		s.Logger.Error("Error listening on " + s.Bind + ", " + err.Error())
+		return err // Return error if binding was unsuccessful
+	}
+
+	// ensure listener will be closed
+	defer func() {
+		_ = ln.Close()
+	}()
+
+	// Create a cancelable context based on s.Context
+	ctx, cancel := context.WithCancel(s.Context)
+	defer cancel() // Ensure resources are cleaned up
+
+	// Start to accept connections and serve them
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			conn, err := ln.Accept()
+			if err != nil {
+				s.Logger.Error(err)
+				continue
+			}
+
+			// Start a new goroutine to handle each connection
+			// This way, the server can handle multiple connections concurrently
+			go func() {
+				err := s.ServeConn(conn)
+				if err != nil {
+					s.Logger.Error(err) // Log errors from ServeConn
+				}
+			}()
+		}
+	}
+}
+
 func WithLogger(logger statute.Logger) ServerOption {
 	return func(s *Server) {
 		s.Logger = logger
+	}
+}
+
+func WithBind(bindAddress string) ServerOption {
+	return func(s *Server) {
+		s.Bind = bindAddress
 	}
 }
 
@@ -53,6 +104,18 @@ func WithConnectHandle(handler statute.UserConnectHandler) ServerOption {
 func WithProxyDial(proxyDial statute.ProxyDialFunc) ServerOption {
 	return func(s *Server) {
 		s.ProxyDial = proxyDial
+	}
+}
+
+func WithContext(ctx context.Context) ServerOption {
+	return func(s *Server) {
+		s.Context = ctx
+	}
+}
+
+func WithBytesPool(bytesPool statute.BytesPool) ServerOption {
+	return func(s *Server) {
+		s.BytesPool = bytesPool
 	}
 }
 
@@ -129,8 +192,7 @@ func (s *Server) embedHandleConnect(req *request) error {
 	defer func() {
 		_ = req.Conn.Close()
 	}()
-	ctx := s.context()
-	target, err := s.proxyDial(ctx, "tcp", req.DestinationAddr.Address())
+	target, err := s.ProxyDial(s.Context, "tcp", req.DestinationAddr.Address())
 	if err != nil {
 		if err := sendReply(req.Conn, rejectedReply, nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
@@ -158,23 +220,7 @@ func (s *Server) embedHandleConnect(req *request) error {
 		buf1 = make([]byte, 32*1024)
 		buf2 = make([]byte, 32*1024)
 	}
-	return tunnel(ctx, target, req.Conn, buf1, buf2)
-}
-
-func (s *Server) proxyDial(ctx context.Context, network, address string) (net.Conn, error) {
-	proxyDial := s.ProxyDial
-	if proxyDial == nil {
-		var dialer net.Dialer
-		proxyDial = dialer.DialContext
-	}
-	return proxyDial(ctx, network, address)
-}
-
-func (s *Server) context() context.Context {
-	if s.Context == nil {
-		return context.Background()
-	}
-	return s.Context
+	return statute.Tunnel(s.Context, target, req.Conn, buf1, buf2)
 }
 
 func sendReply(w io.Writer, resp reply, addr *address) error {

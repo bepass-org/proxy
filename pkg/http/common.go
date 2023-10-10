@@ -63,7 +63,7 @@ type customConn struct {
 	once        sync.Once
 }
 
-func (c *customConn) Write(p []byte) (n int, err error) {
+func (c *customConn) Read(p []byte) (n int, err error) {
 	c.once.Do(func() {
 		buf := &bytes.Buffer{}
 		err = c.req.Write(buf)
@@ -75,10 +75,11 @@ func (c *customConn) Write(p []byte) (n int, err error) {
 	})
 
 	if len(c.initialData) > 0 {
-		n, err = c.Conn.Write(c.initialData)
+		copy(p, c.initialData)
+		n = len(p)
 		c.initialData = nil
 		return
 	}
 
-	return c.Conn.Write(p)
+	return c.Conn.Read(p)
 }
