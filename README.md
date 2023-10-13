@@ -61,7 +61,7 @@ func main() {
 
 ```
 
-There are other examples provided in the [example](example/) directory
+There are other examples provided in the [example](https://github.com/bepass-org/proxy/tree/main/example) directory
 
 
 
