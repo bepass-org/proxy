@@ -1,2 +1,67 @@
-# proxy
-proxy core module for bepass, supports socks5/socks5h full UDP/TCP, IPv4, IPv6. supports socks4/a, http and https-connect proxy
+# Table of Contents
+- [Introduction](#introduction)
+- [Features](#features)
+- [Installation](#installation)
+- [Examples](#examples)
+  - [Minimal](#minimal)
+  - [Customized](#customized)
+
+
+## Introduction
+The proxy module simplifies connection handling and offers a generic way to work with both HTTP and SOCKS connections, 
+making it a powerful tool for managing network traffic.
+
+
+## Features
+The Inbound Proxy project offers the following features:
+
+- Full support for `HTTP`, `SOCKS5`, `SOCKS5h`, `SOCKS4` and `SOCKS4a` protocols.
+- Handling of `HTTP` and `HTTPS-connect` proxy requests.
+- Full support for both `IPv4` and `IPv6`.
+- Able to handle both `TCP` and `UDP` traffic.
+
+## Installation
+
+```bash 
+go get github.com/bepass-org/proxy
+```
+
+### Examples
+
+#### Minimal
+
+```go
+package main
+
+import (
+	"github.com/bepass-org/proxy/pkg/mixed"
+)
+
+func main() {
+	proxy := mixed.NewProxy()
+	_ = proxy.ListenAndServe()
+}
+```
+
+#### Customized
+
+```go
+package main
+
+import (
+  "github.com/bepass-org/proxy/pkg/mixed"
+)
+
+func main() {
+  proxy := mixed.NewProxy(
+    mixed.WithBinAddress("0.0.0.0:8080"),
+  )
+  _ = proxy.ListenAndServe()
+}
+
+```
+
+There are other examples provided in the [example](example/) directory
+
+
+
