@@ -5,7 +5,7 @@ import (
 	"github.com/bepass-org/proxy/pkg/statute"
 )
 
-func WithBinAddress(binAddress string) Option {
+func WithBindAddress(binAddress string) Option {
 	return func(p *Proxy) {
 		p.bind = binAddress
 		p.socks5Proxy.Bind = binAddress

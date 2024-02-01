@@ -54,7 +54,7 @@ import (
 
 func main() {
   proxy := mixed.NewProxy(
-    mixed.WithBinAddress("0.0.0.0:8080"),
+    mixed.WithBindAddress("0.0.0.0:8080"),
   )
   _ = proxy.ListenAndServe()
 }

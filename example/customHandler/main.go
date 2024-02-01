@@ -11,7 +11,7 @@ import (
 
 func main() {
 	proxy := mixed.NewProxy(
-		mixed.WithBinAddress("127.0.0.1:1080"),
+		mixed.WithBindAddress("127.0.0.1:1080"),
 		mixed.WithUserHandler(generalHandler),
 	)
 	_ = proxy.ListenAndServe()
