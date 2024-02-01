@@ -6,7 +6,7 @@ func main() {
 	myLogger, _ := NewLogger("proxy.log")
 
 	proxy := mixed.NewProxy(
-		mixed.WithBinAddress("127.0.0.1:1080"),
+		mixed.WithBindAddress("127.0.0.1:1080"),
 		mixed.WithLogger(myLogger),
 	)
 	_ = proxy.ListenAndServe()
