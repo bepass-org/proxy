@@ -294,7 +294,7 @@ func (s *Server) embedHandleConnect(req *request) error {
 
 func (s *Server) handleAssociate(req *request) error {
 	destinationAddr := req.DestinationAddr.String()
-	udpConn, err := s.ProxyListenPacket(s.Context, "udp", destinationAddr)
+	udpConn, err := s.ProxyListenPacket(s.Context, "udp", "0.0.0.0:0")
 	if err != nil {
 		if err := sendReply(req.Conn, errToReply(err), nil); err != nil {
 			return fmt.Errorf("failed to send reply: %v", err)
